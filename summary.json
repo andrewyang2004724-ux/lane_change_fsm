@@ -1,0 +1,12 @@
+{
+  "num_ticks": 3115,
+  "avg_speed_mps": 22.353949428778353,
+  "avg_speed_kmh": 80.47421794360207,
+  "min_curr_front_dist": 5.090147965988522,
+  "collision_count": 1,
+  "lane_invasion_count": 2,
+  "state_distribution": {
+    "FOLLOW_LANE": 3103,
+    "EMERGENCY_BRAKE": 12
+  }
+}
