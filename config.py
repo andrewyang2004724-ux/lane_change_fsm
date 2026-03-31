@@ -32,13 +32,13 @@ MAX_SPEED = 120.0 / 3.6            # m/s
 # =========================
 # 安全评估参数
 # =========================
-MIN_GAP = 8.0
-TIME_HEADWAY = 1.5
+MIN_GAP = 10.0
+TIME_HEADWAY = 1.8
 COMFORT_DEC = 3.0
 
-TTC_FRONT_MIN = 4.0
+TTC_FRONT_MIN = 5.0
 TTC_REAR_MIN = 3.0
-TTC_EMERGENCY = 1.5
+TTC_EMERGENCY = 2.0
 
 DETECTION_RADIUS = 100.0
 PREPARE_STABLE_TICKS = 4

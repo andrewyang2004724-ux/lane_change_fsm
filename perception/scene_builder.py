@@ -83,8 +83,7 @@ def _is_reasonable_neighbor(curr_wp, candidate, side="right"):
     curr_lane = curr_wp.lane_id
     cand_lane = candidate.lane_id
 
-    # CARLA 中 lane_id 正负方向可能和直觉不完全一致，
-    # 所以这里不强依赖“左一定增 / 右一定减”，只避免完全同 lane。
+    # 不允许还是同 lane
     if cand_lane == curr_lane:
         return False
 
@@ -147,6 +146,9 @@ def build_scene(world, world_map, ego):
     left_wp = get_left_lane_if_possible(ego_wp) if ego_wp is not None else None
     right_wp = get_right_lane_if_possible(ego_wp) if ego_wp is not None else None
 
+    left_wp_from_recovery = False
+    right_wp_from_recovery = False
+
     # -----------------------------------------------------
     # 邻道 waypoint 恢复 + 短时 hold
     # -----------------------------------------------------
@@ -159,6 +161,7 @@ def build_scene(world, world_map, ego):
             recovered_left = _recover_neighbor_wp(ego_wp, cached_left, side="left")
             if recovered_left is not None:
                 left_wp = recovered_left
+                left_wp_from_recovery = True
                 _LAST_SCENE_CACHE["left_hold_ticks"] = _NEIGHBOR_HOLD_TICKS
         elif left_wp is not None:
             _LAST_SCENE_CACHE["left_hold_ticks"] = 0
@@ -167,6 +170,7 @@ def build_scene(world, world_map, ego):
                 recovered_left = _recover_neighbor_wp(ego_wp, cached_left, side="left")
                 if recovered_left is not None:
                     left_wp = recovered_left
+                    left_wp_from_recovery = True
                 _LAST_SCENE_CACHE["left_hold_ticks"] -= 1
 
         # 恢复 right
@@ -174,6 +178,7 @@ def build_scene(world, world_map, ego):
             recovered_right = _recover_neighbor_wp(ego_wp, cached_right, side="right")
             if recovered_right is not None:
                 right_wp = recovered_right
+                right_wp_from_recovery = True
                 _LAST_SCENE_CACHE["right_hold_ticks"] = _NEIGHBOR_HOLD_TICKS
         elif right_wp is not None:
             _LAST_SCENE_CACHE["right_hold_ticks"] = 0
@@ -182,6 +187,7 @@ def build_scene(world, world_map, ego):
                 recovered_right = _recover_neighbor_wp(ego_wp, cached_right, side="right")
                 if recovered_right is not None:
                     right_wp = recovered_right
+                    right_wp_from_recovery = True
                 _LAST_SCENE_CACHE["right_hold_ticks"] -= 1
 
     # -----------------------------------------------------
@@ -215,6 +221,10 @@ def build_scene(world, world_map, ego):
         "left_allowed": left_allowed,
         "right_allowed": right_allowed,
 
+        # 新增：标记邻道 wp 是否来自恢复/hold
+        "left_wp_from_recovery": left_wp_from_recovery,
+        "right_wp_from_recovery": right_wp_from_recovery,
+
         "curr_front": vehicle_info_relative(ego, curr_front),
         "curr_rear": vehicle_info_relative(ego, curr_rear),
 
@@ -224,7 +234,7 @@ def build_scene(world, world_map, ego):
         "right_front": vehicle_info_relative(ego, right_front),
         "right_rear": vehicle_info_relative(ego, right_rear),
 
-        # 调试字段，方便你在日志里看 scene 是否在抖
+        # 调试字段
         "debug_scene": {
             "ego_lane_id": getattr(ego_wp, "lane_id", None) if ego_wp is not None else None,
             "ego_road_id": getattr(ego_wp, "road_id", None) if ego_wp is not None else None,
@@ -235,6 +245,9 @@ def build_scene(world, world_map, ego):
 
             "left_hold_ticks": _LAST_SCENE_CACHE["left_hold_ticks"],
             "right_hold_ticks": _LAST_SCENE_CACHE["right_hold_ticks"],
+
+            "left_wp_from_recovery": left_wp_from_recovery,
+            "right_wp_from_recovery": right_wp_from_recovery,
         }
     }
 

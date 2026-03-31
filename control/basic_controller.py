@@ -17,11 +17,11 @@ from decision.state_machine import FSMState
 
 class BasicLaneController:
     """
-    改进点：
-    1. 换道期间优先跟踪“目标车道中心 + 前瞻点”，减少目标跳变
-    2. 增加转向平滑，抑制横向抽动
-    3. 纵向控制加入油门/刹车平滑，避免频繁切换
-    4. 换道阶段降低对当前车道前车的过度敏感，避免卡住不动
+    修复版：
+    1. 加入横向误差 cte 控制，减少沿车道线左右摆动
+    2. 预瞄距离随速度变化，减小弯道切弯
+    3. 弯道根据 yaw_error 主动降速
+    4. 高速时收紧 steer_limit，降低摆振和出道风险
     """
 
     def __init__(self, world_map, ego):
@@ -33,9 +33,11 @@ class BasicLaneController:
         self.last_throttle = 0.0
         self.last_brake = 0.0
 
-        # 换道时记住目标 waypoint，避免瞬时丢失导致目标乱跳
         self.last_target_wp = None
-        self.last_target_lane_change_side = None  # "left" / "right" / None
+        self.last_target_lane_change_side = None
+
+        # 新增：横向误差增益
+        self.k_cte = 0.75
 
     def _speed(self):
         v = self.ego.get_velocity()
@@ -60,12 +62,28 @@ class BasicLaneController:
             FSMState.PREPARE_RETURN_RIGHT,
         ]
 
+    def _clear_lane_change_cache_if_needed(self, state):
+        if (not self._is_left_change_state(state)) and (not self._is_right_change_state(state)):
+            self.last_target_lane_change_side = None
+
+    def _preview_distance(self, state, speed):
+        """
+        预瞄距离随速度变化。
+        跟车时不要太远，避免弯道切弯。
+        """
+        if self._is_left_change_state(state) or self._is_right_change_state(state):
+            return max(10.0, min(18.0, 10.0 + 0.35 * speed))
+        return max(8.0, min(16.0, 8.0 + 0.30 * speed))
+
     def _select_lane_change_target_wp(self, lane_wp, preview_dist):
         if lane_wp is None:
             return None
-        nxt = lane_wp.next(preview_dist)
-        if len(nxt) > 0:
-            return nxt[0]
+        try:
+            nxt = lane_wp.next(preview_dist)
+            if len(nxt) > 0:
+                return nxt[0]
+        except Exception:
+            pass
         return lane_wp
 
     def _target_waypoint(self, scene, state):
@@ -73,65 +91,71 @@ class BasicLaneController:
         if ego_wp is None:
             return None, "ego_wp_missing"
 
-        # ---------- 左变道 ----------
+        self._clear_lane_change_cache_if_needed(state)
+        speed = self._speed()
+        preview_dist = self._preview_distance(state, speed)
+
         if self._is_left_change_state(state):
-            target_wp = self._select_lane_change_target_wp(scene["left_wp"], 18.0)
+            target_wp = self._select_lane_change_target_wp(scene["left_wp"], preview_dist)
             if target_wp is not None:
                 self.last_target_wp = target_wp
                 self.last_target_lane_change_side = "left"
                 return target_wp, "left_changing_wp"
 
-            # 目标车道瞬时丢失时，继续沿用上一帧目标，避免抖动
             if self.last_target_lane_change_side == "left" and self.last_target_wp is not None:
                 return self.last_target_wp, "left_changing_wp_reuse"
 
-            nxt = ego_wp.next(14.0)
+            nxt = ego_wp.next(max(8.0, preview_dist))
             if len(nxt) > 0:
                 return nxt[0], "left_changing_wp_missing_fallback"
             return ego_wp, "left_changing_wp_missing_fallback"
 
-        # ---------- 右变道 / 右返回 ----------
         if self._is_right_change_state(state):
-            target_wp = self._select_lane_change_target_wp(scene["right_wp"], 18.0)
+            target_wp = self._select_lane_change_target_wp(scene["right_wp"], preview_dist)
             if target_wp is not None:
                 self.last_target_wp = target_wp
                 self.last_target_lane_change_side = "right"
                 return target_wp, "right_changing_wp"
 
-            # 目标车道瞬时丢失时，继续沿用上一帧目标，避免抖动
             if self.last_target_lane_change_side == "right" and self.last_target_wp is not None:
                 return self.last_target_wp, "right_changing_wp_reuse"
 
-            nxt = ego_wp.next(14.0)
+            nxt = ego_wp.next(max(8.0, preview_dist))
             if len(nxt) > 0:
                 return nxt[0], "right_changing_wp_missing"
             return ego_wp, "right_changing_wp_missing"
 
-        # ---------- 正常跟车 ----------
-        self.last_target_lane_change_side = None
+        try:
+            nxt = ego_wp.next(preview_dist)
+            if len(nxt) > 0:
+                self.last_target_wp = nxt[0]
+                return nxt[0], "follow_lane_wp"
+        except Exception:
+            pass
 
-        nxt = ego_wp.next(12.0)
-        if len(nxt) > 0:
-            self.last_target_wp = nxt[0]
-            return nxt[0], "follow_lane_wp"
         self.last_target_wp = ego_wp
         return ego_wp, "follow_lane_wp"
 
     def _smooth_transition(self, prev, new, rise_rate=0.12, fall_rate=0.20):
-        """
-        对控制量进行斜率限制：
-        - 上升慢一点，避免猛给
-        - 下降可稍快，保证安全
-        """
         if new > prev:
             return min(new, prev + rise_rate)
-        else:
-            return max(new, prev - fall_rate)
+        return max(new, prev - fall_rate)
 
-    def _longitudinal_control(self, scene, state):
+    def _curve_speed_limit(self, yaw_error_abs):
         """
-        纵向控制：巡航 + 跟车 + 紧急制动 + 换道期抑制抽动
+        基于航向误差的最小侵入弯道限速。
         """
+        if yaw_error_abs > 0.22:
+            return 11.0
+        if yaw_error_abs > 0.16:
+            return 14.0
+        if yaw_error_abs > 0.10:
+            return 18.0
+        if yaw_error_abs > 0.06:
+            return 22.0
+        return TARGET_SPEED
+
+    def _longitudinal_control(self, scene, state, yaw_error_abs=0.0):
         current_speed = self._speed()
 
         curr_front_dist = scene["curr_front"]["dist"]
@@ -143,7 +167,6 @@ class BasicLaneController:
         right_front_dist = scene["right_front"]["dist"]
         right_front_speed = scene["right_front"]["speed"]
 
-        # 默认目标速度
         if state in [FSMState.LANE_CHANGE_LEFT]:
             desired_speed = OVERTAKE_SPEED
         elif state in [FSMState.LANE_CHANGE_RIGHT, FSMState.PREPARE_RETURN_RIGHT]:
@@ -153,14 +176,15 @@ class BasicLaneController:
         else:
             desired_speed = TARGET_SPEED
 
+        # 新增：弯道限速
+        desired_speed = min(desired_speed, self._curve_speed_limit(yaw_error_abs))
+
         safe_dist = MIN_GAP + TIME_HEADWAY * current_speed
 
-        # 选择“当前主要约束前车”
         front_dist = curr_front_dist
         front_speed = curr_front_speed
         front_source = "curr"
 
-        # 左变道时，优先关注左前车；否则当前车道前车会让车在换道时抽动
         if state in [FSMState.PREPARE_LANE_CHANGE_LEFT, FSMState.LANE_CHANGE_LEFT]:
             if left_front_dist < 999.0:
                 blended = min(curr_front_dist + 6.0, left_front_dist)
@@ -173,7 +197,6 @@ class BasicLaneController:
                     front_speed = left_front_speed
                     front_source = "left"
 
-        # 右变道 / 回右时，优先关注右前车
         if state in [FSMState.LANE_CHANGE_RIGHT, FSMState.PREPARE_RETURN_RIGHT]:
             if right_front_dist < 999.0:
                 blended = min(curr_front_dist + 6.0, right_front_dist)
@@ -186,19 +209,16 @@ class BasicLaneController:
                     front_speed = right_front_speed
                     front_source = "right"
 
-        # 紧急制动
         if state == FSMState.EMERGENCY_BRAKE:
             throttle_cmd = 0.0
             brake_cmd = 0.8
             mode = "emergency_brake"
         else:
-            # 极近距离，强制刹车
             if front_dist < max(6.0, 0.45 * safe_dist):
                 throttle_cmd = 0.0
                 brake_cmd = min(MAX_BRAKE, 0.9)
                 mode = "hard_brake"
             else:
-                # 跟车逻辑
                 if front_dist < safe_dist:
                     desired_speed = min(desired_speed, max(0.0, front_speed - 0.5))
                 elif front_dist < 1.6 * safe_dist:
@@ -216,26 +236,23 @@ class BasicLaneController:
                     throttle_cmd = min(MAX_THROTTLE, KP_SPEED * speed_error)
                     brake_cmd = 0.0
                     mode = "cruise_or_acc"
-                elif speed_error <= -0.4:
+                elif speed_error <= -0.3:
                     throttle_cmd = 0.0
-                    brake_cmd = min(MAX_BRAKE, -0.35 * speed_error)
+                    brake_cmd = min(MAX_BRAKE, -0.40 * speed_error)
                     mode = "follow_or_decel"
                 else:
-                    # 小误差死区，避免油门刹车来回抖
                     throttle_cmd = 0.0
                     brake_cmd = 0.0
                     mode = "hold"
 
-        # 油门 / 刹车互斥 + 平滑
         if brake_cmd > 0.0:
             throttle_cmd = 0.0
         if throttle_cmd > 0.0:
             brake_cmd = 0.0
 
-        throttle = self._smooth_transition(self.last_throttle, throttle_cmd, rise_rate=0.10, fall_rate=0.18)
-        brake = self._smooth_transition(self.last_brake, brake_cmd, rise_rate=0.18, fall_rate=0.22)
+        throttle = self._smooth_transition(self.last_throttle, throttle_cmd, rise_rate=0.08, fall_rate=0.15)
+        brake = self._smooth_transition(self.last_brake, brake_cmd, rise_rate=0.20, fall_rate=0.20)
 
-        # 互斥再保护一次
         if brake > 0.05 and throttle < 0.08:
             throttle = 0.0
         if throttle > 0.05 and brake < 0.05:
@@ -272,22 +289,38 @@ class BasicLaneController:
         d_error = yaw_error - self.last_steer_error
         self.last_steer_error = yaw_error
 
-        raw_steer = KP_STEER * yaw_error + KD_STEER * d_error
+        # 新增：横向误差 cte（在自车坐标系下，目标点的横向偏移）
+        local_x = math.cos(ego_yaw) * dx + math.sin(ego_yaw) * dy
+        local_y = -math.sin(ego_yaw) * dx + math.cos(ego_yaw) * dy
+        cte = local_y
 
-        # 换道时允许略大一点的转向，但要平滑
-        if state in [FSMState.LANE_CHANGE_LEFT, FSMState.LANE_CHANGE_RIGHT]:
-            steer_limit = min(MAX_STEER, 0.85)
+        # 速度越高，cte 权重要适当收敛，防止高速大幅摆动
+        speed = self._speed()
+        k_cte_eff = self.k_cte / max(1.0, 0.25 * speed)
+
+        raw_steer = KP_STEER * yaw_error + KD_STEER * d_error + k_cte_eff * math.atan2(cte, max(4.0, speed))
+
+        # 高速时降低 steer limit
+        if speed > 22.0:
+            steer_limit = min(MAX_STEER, 0.38)
+        elif speed > 16.0:
+            steer_limit = min(MAX_STEER, 0.45)
+        elif speed > 10.0:
+            steer_limit = min(MAX_STEER, 0.55)
         else:
             steer_limit = min(MAX_STEER, 0.70)
 
+        if state in [FSMState.LANE_CHANGE_LEFT, FSMState.LANE_CHANGE_RIGHT]:
+            steer_limit = min(MAX_STEER, max(steer_limit, 0.55))
+
         raw_steer = max(-steer_limit, min(steer_limit, raw_steer))
 
-        # 转向低通平滑，避免抽动
-        steer = 0.75 * self.last_steer_cmd + 0.25 * raw_steer
+        # 转向平滑再加强一点
+        steer = 0.82 * self.last_steer_cmd + 0.18 * raw_steer
         steer = max(-steer_limit, min(steer_limit, steer))
         self.last_steer_cmd = steer
 
-        throttle, brake, lon_debug = self._longitudinal_control(scene, state)
+        throttle, brake, lon_debug = self._longitudinal_control(scene, state, yaw_error_abs=abs(yaw_error))
 
         control = carla.VehicleControl(
             throttle=float(throttle),
@@ -301,8 +334,12 @@ class BasicLaneController:
             "brake": float(brake),
             "yaw_error": float(yaw_error),
             "d_error": float(d_error),
+            "cte": float(cte),
+            "local_x": float(local_x),
+            "local_y": float(local_y),
             "wp_reason": wp_reason,
-            "reason": wp_reason,   # 兼容你现有 logger 的 reason 字段
+            "reason": wp_reason,
+            "target_lane_change_side": self.last_target_lane_change_side,
         }
         debug.update(lon_debug)
 

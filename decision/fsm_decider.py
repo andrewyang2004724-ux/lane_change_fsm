@@ -11,15 +11,7 @@ from perception.vehicle_filter import vehicle_speed
 
 class LaneChangeDecider:
     """
-    更稳健的有限状态机决策器
-
-    改进点：
-    1. FOLLOW -> PREPARE -> EXECUTE 使用连续稳定计数，减少抖动
-    2. PREPARE 阶段不是 1 帧跳转，而是再次确认安全后才执行
-    3. LANE_CHANGE 阶段增加超时保护，避免一直卡住
-    4. OVERTAKE / RETURN 过程增加稳定保持逻辑
-    5. EMERGENCY_BRAKE 恢复更温和
-    6. 兼容现有 FSMState，不新增 state_machine.py 枚举
+    更稳健的有限状态机决策器（最小侵入补丁版）
     """
 
     def __init__(
@@ -38,31 +30,24 @@ class LaneChangeDecider:
 
         self.state = FSMState.FOLLOW_LANE
 
-        # 跟你原来兼容的计数器
         self.prepare_count = 0
         self.stable_ticks = stable_ticks
 
-        # 新增：prepare 再确认
         self.prepare_confirm_ticks = prepare_confirm_ticks
         self.prepare_confirm_count = 0
 
-        # 新增：变道超时
         self.lane_change_timeout = lane_change_timeout
         self.lane_change_ticks = 0
 
-        # 新增：紧急制动恢复稳定计数
         self.emergency_release_ticks = emergency_release_ticks
         self.emergency_release_count = 0
 
-        # 超车目标
         self.overtake_target_id = None
-
-        # False: 正常“超车完成后回右”
-        # True : “左侧不可用时，主动向右绕行”
         self.right_change_is_bypass = False
+        self.pending_direction = None
 
-        # 记录准备方向，避免 prepare 阶段来回跳
-        self.pending_direction = None  # "left" / "right" / None
+        # 新增：执行变道时锁存目标 lane_id，避免用跳变的 left/right_wp 判完成
+        self.target_lane_id = None
 
     def _find_actor_by_id(self, actor_id):
         if actor_id is None:
@@ -74,10 +59,6 @@ class LaneChangeDecider:
         return None
 
     def _get_target_pass_margin(self, target_id):
-        """
-        计算 ego 相对目标车的纵向领先距离。
-        正值通常表示 ego 已经超过目标车。
-        """
         if target_id is None:
             return 0.0
 
@@ -89,16 +70,12 @@ class LaneChangeDecider:
         return longitudinal_distance(self.ego, target)
 
     def _need_bypass(self, ego_speed, curr_front):
-        """
-        是否需要绕过前车。
-        """
         if curr_front["vehicle"] is None:
             return False
 
         if should_overtake(ego_speed, curr_front["dist"], curr_front["speed"]):
             return True
 
-        # 补充一个更积极的触发条件，减少长期低速跟车
         rel_speed = ego_speed - curr_front["speed"]
         if curr_front["dist"] < 28.0 and rel_speed > 2.0:
             return True
@@ -106,10 +83,6 @@ class LaneChangeDecider:
         return False
 
     def _evaluate_right_bypass(self, ego_speed, curr_front, right_front, right_rear, scene):
-        """
-        评估是否可以向右绕行。
-        不依赖 behavior_rules 新接口，保持兼容。
-        """
         if scene["right_wp"] is None or (not scene["right_allowed"]):
             return {"safe": False, "reason": "right_not_allowed"}, -1.0
 
@@ -151,9 +124,6 @@ class LaneChangeDecider:
         self.pending_direction = None
 
     def _start_prepare(self, direction, curr_front):
-        """
-        direction: "left" / "right"
-        """
         self.pending_direction = direction
         self.prepare_count = 0
         self.prepare_confirm_count = 0
@@ -161,14 +131,42 @@ class LaneChangeDecider:
         if curr_front["vehicle"] is not None:
             self.overtake_target_id = curr_front["vehicle"].id
 
-    def _enter_lane_change(self, to_right_bypass=False):
+    def _lock_target_lane_id(self, scene, direction):
+        """
+        direction: 'left' / 'right'
+        在真正执行变道前锁存目标 lane_id。
+        """
+        target_wp = scene["left_wp"] if direction == "left" else scene["right_wp"]
+        if target_wp is not None:
+            self.target_lane_id = getattr(target_wp, "lane_id", None)
+        else:
+            self.target_lane_id = None
+
+    def _enter_lane_change(self, scene, to_right_bypass=False):
         self.lane_change_ticks = 0
         self.right_change_is_bypass = to_right_bypass
 
         if to_right_bypass:
+            self._lock_target_lane_id(scene, "right")
             self.state = FSMState.LANE_CHANGE_RIGHT
         else:
+            self._lock_target_lane_id(scene, "left")
             self.state = FSMState.LANE_CHANGE_LEFT
+
+    def _is_lane_change_finished(self, scene):
+        ego_wp = scene.get("ego_wp", None)
+        if ego_wp is None:
+            return False
+
+        ego_lane_id = getattr(ego_wp, "lane_id", None)
+        if ego_lane_id is None:
+            return False
+
+        # 优先使用锁存的目标 lane_id
+        if self.target_lane_id is not None:
+            return ego_lane_id == self.target_lane_id
+
+        return False
 
     def update(self):
         scene = build_scene(self.world, self.world_map, self.ego)
@@ -194,6 +192,9 @@ class LaneChangeDecider:
             "right_change_is_bypass": self.right_change_is_bypass,
             "overtake_target_id": self.overtake_target_id,
             "pending_direction": self.pending_direction,
+            "target_lane_id": self.target_lane_id,
+            "left_wp_from_recovery": scene.get("left_wp_from_recovery", False),
+            "right_wp_from_recovery": scene.get("right_wp_from_recovery", False),
         }
 
         # =============================
@@ -204,6 +205,7 @@ class LaneChangeDecider:
             self._reset_prepare()
             self.lane_change_ticks = 0
             self.emergency_release_count = 0
+            self.target_lane_id = None
             extra["decision"] = "enter_emergency"
             extra["reason"] = "emergency"
             return self.state, scene, extra
@@ -222,7 +224,15 @@ class LaneChangeDecider:
         right_safe_info = None
 
         # ---------- 左侧评估 ----------
-        if scene["left_wp"] is not None and scene["left_allowed"] and need_bypass:
+        # prepare 阶段尽量要求是“真实检测到的左邻道”，降低恢复态误触发
+        left_neighbor_usable = (
+            scene["left_wp"] is not None
+            and scene["left_allowed"]
+            and need_bypass
+            and (not scene.get("left_wp_from_recovery", False))
+        )
+
+        if left_neighbor_usable:
             left_candidate = True
             safe_info, benefit = evaluate_left_change(
                 ego_speed,
@@ -235,7 +245,14 @@ class LaneChangeDecider:
             left_safe_info = safe_info
 
         # ---------- 右侧绕行评估 ----------
-        if scene["right_wp"] is not None and scene["right_allowed"] and need_bypass:
+        right_neighbor_usable = (
+            scene["right_wp"] is not None
+            and scene["right_allowed"]
+            and need_bypass
+            and (not scene.get("right_wp_from_recovery", False))
+        )
+
+        if right_neighbor_usable:
             right_candidate = True
             safe_info_r, benefit_r = self._evaluate_right_bypass(
                 ego_speed, curr_front, right_front, right_rear, scene
@@ -261,12 +278,13 @@ class LaneChangeDecider:
         # FOLLOW_LANE
         # =============================
         if self.state == FSMState.FOLLOW_LANE:
+            self.target_lane_id = None
+
             if not need_bypass:
                 self._reset_prepare()
                 extra["decision"] = "stay_follow_no_need"
                 return self.state, scene, extra
 
-            # 优先左侧，其次右绕行
             if choose_left:
                 if self.pending_direction not in (None, "left"):
                     self._reset_prepare()
@@ -322,7 +340,7 @@ class LaneChangeDecider:
 
                 if self.prepare_confirm_count >= self.prepare_confirm_ticks:
                     self._reset_prepare()
-                    self._enter_lane_change(to_right_bypass=False)
+                    self._enter_lane_change(scene, to_right_bypass=False)
                     extra["decision"] = "execute_left_change"
 
         # =============================
@@ -331,34 +349,27 @@ class LaneChangeDecider:
         elif self.state == FSMState.LANE_CHANGE_LEFT:
             self.lane_change_ticks += 1
 
-            # 注意：这里沿用你原来的 lane_id 判定方式
-            if scene["left_wp"] is not None and scene["ego_wp"] is not None:
-                if scene["ego_wp"].lane_id == scene["left_wp"].lane_id:
-                    self.state = FSMState.OVERTAKE_CRUISE
-                    self.lane_change_ticks = 0
-                    extra["decision"] = "left_change_done_enter_overtake"
-                else:
-                    if self.lane_change_ticks > self.lane_change_timeout:
-                        # 超时后退回跟车，避免永远卡在变道态
-                        self.state = FSMState.FOLLOW_LANE
-                        self.lane_change_ticks = 0
-                        self._reset_prepare()
-                        extra["decision"] = "left_change_timeout_fallback"
-                    else:
-                        extra["decision"] = "left_changing"
+            if self._is_lane_change_finished(scene):
+                self.state = FSMState.OVERTAKE_CRUISE
+                self.lane_change_ticks = 0
+                self.target_lane_id = None
+                extra["decision"] = "left_change_done_enter_overtake"
             else:
                 if self.lane_change_ticks > self.lane_change_timeout:
                     self.state = FSMState.FOLLOW_LANE
                     self.lane_change_ticks = 0
                     self._reset_prepare()
-                    extra["decision"] = "left_change_wp_missing_timeout_fallback"
+                    self.target_lane_id = None
+                    extra["decision"] = "left_change_timeout_fallback"
                 else:
-                    extra["decision"] = "left_changing_wp_missing"
+                    extra["decision"] = "left_changing"
 
         # =============================
         # OVERTAKE_CRUISE
         # =============================
         elif self.state == FSMState.OVERTAKE_CRUISE:
+            self.target_lane_id = None
+
             pass_margin = self._get_target_pass_margin(self.overtake_target_id)
             extra["pass_margin"] = pass_margin
 
@@ -380,23 +391,21 @@ class LaneChangeDecider:
 
         # =============================
         # PREPARE_RETURN_RIGHT
-        # 兼容两种语义：
-        # 1) 左超后回右
-        # 2) 主动右绕行
         # =============================
         elif self.state == FSMState.PREPARE_RETURN_RIGHT:
             if self.right_change_is_bypass:
-                # 右绕行：仍需确认 need_bypass 和右侧安全
                 if not need_bypass:
                     self.state = FSMState.FOLLOW_LANE
                     self._reset_prepare()
                     self.right_change_is_bypass = False
+                    self.target_lane_id = None
                     extra["decision"] = "cancel_prepare_right_bypass_no_need"
 
                 elif not choose_right:
                     self.state = FSMState.FOLLOW_LANE
                     self._reset_prepare()
                     self.right_change_is_bypass = False
+                    self.target_lane_id = None
                     extra["decision"] = "cancel_prepare_right_bypass_not_safe"
 
                 else:
@@ -405,15 +414,16 @@ class LaneChangeDecider:
 
                     if self.prepare_confirm_count >= self.prepare_confirm_ticks:
                         self._reset_prepare()
+                        self._lock_target_lane_id(scene, "right")
                         self.state = FSMState.LANE_CHANGE_RIGHT
                         self.lane_change_ticks = 0
                         self.right_change_is_bypass = True
                         extra["decision"] = "execute_right_bypass"
             else:
-                # 回右：主要看右侧是否允许存在
                 if scene["right_wp"] is None or (not scene["right_allowed"]):
                     self.state = FSMState.OVERTAKE_CRUISE
                     self.prepare_confirm_count = 0
+                    self.target_lane_id = None
                     extra["decision"] = "cancel_return_right_no_right_lane"
                 else:
                     self.prepare_confirm_count += 1
@@ -421,6 +431,7 @@ class LaneChangeDecider:
 
                     if self.prepare_confirm_count >= self.prepare_confirm_ticks:
                         self._reset_prepare()
+                        self._lock_target_lane_id(scene, "right")
                         self.state = FSMState.LANE_CHANGE_RIGHT
                         self.lane_change_ticks = 0
                         self.right_change_is_bypass = False
@@ -432,48 +443,35 @@ class LaneChangeDecider:
         elif self.state == FSMState.LANE_CHANGE_RIGHT:
             self.lane_change_ticks += 1
 
-            if scene["right_wp"] is not None and scene["ego_wp"] is not None:
-                if scene["ego_wp"].lane_id == scene["right_wp"].lane_id:
-                    if self.right_change_is_bypass:
-                        self.state = FSMState.OVERTAKE_CRUISE
-                        extra["decision"] = "right_bypass_done_enter_overtake"
-                    else:
-                        self.state = FSMState.FOLLOW_LANE
-                        self.overtake_target_id = None
-                        extra["decision"] = "return_right_done_follow"
-
-                    self.right_change_is_bypass = False
-                    self.lane_change_ticks = 0
+            if self._is_lane_change_finished(scene):
+                if self.right_change_is_bypass:
+                    self.state = FSMState.OVERTAKE_CRUISE
+                    extra["decision"] = "right_bypass_done_enter_overtake"
                 else:
-                    if self.lane_change_ticks > self.lane_change_timeout:
-                        # 右绕行失败 / 回右失败，保守回退
-                        if self.right_change_is_bypass:
-                            self.state = FSMState.FOLLOW_LANE
-                            extra["decision"] = "right_bypass_timeout_fallback"
-                        else:
-                            self.state = FSMState.OVERTAKE_CRUISE
-                            extra["decision"] = "return_right_timeout_back_to_overtake"
+                    self.state = FSMState.FOLLOW_LANE
+                    self.overtake_target_id = None
+                    extra["decision"] = "return_right_done_follow"
 
-                        self.lane_change_ticks = 0
-                        self.right_change_is_bypass = False
-                    else:
-                        if self.right_change_is_bypass:
-                            extra["decision"] = "right_bypass_changing"
-                        else:
-                            extra["decision"] = "return_right_changing"
+                self.right_change_is_bypass = False
+                self.lane_change_ticks = 0
+                self.target_lane_id = None
             else:
                 if self.lane_change_ticks > self.lane_change_timeout:
                     if self.right_change_is_bypass:
                         self.state = FSMState.FOLLOW_LANE
-                        extra["decision"] = "right_bypass_wp_missing_timeout_fallback"
+                        extra["decision"] = "right_bypass_timeout_fallback"
                     else:
                         self.state = FSMState.OVERTAKE_CRUISE
-                        extra["decision"] = "return_right_wp_missing_timeout_back_to_overtake"
+                        extra["decision"] = "return_right_timeout_back_to_overtake"
 
                     self.lane_change_ticks = 0
                     self.right_change_is_bypass = False
+                    self.target_lane_id = None
                 else:
-                    extra["decision"] = "right_changing_wp_missing"
+                    if self.right_change_is_bypass:
+                        extra["decision"] = "right_bypass_changing"
+                    else:
+                        extra["decision"] = "return_right_changing"
 
         # =============================
         # EMERGENCY_BRAKE
@@ -491,6 +489,7 @@ class LaneChangeDecider:
                     self._reset_prepare()
                     self.lane_change_ticks = 0
                     self.emergency_release_count = 0
+                    self.target_lane_id = None
                     extra["decision"] = "recover_from_emergency"
 
         return self.state, scene, extra
