@@ -10,7 +10,7 @@ TIMEOUT = 10.0
 SYNC_MODE = True
 FIXED_DELTA_SECONDS = 0.05
 
-MAP_NAME = "Town04"   # 高速环路，适合高速公路换道实验
+MAP_NAME = "Town06"   # 高速环路，适合高速公路换道实验
 
 # =========================
 # 交通流配置
@@ -48,8 +48,8 @@ SPEED_DIFF_THRESHOLD = 3.0 / 3.6   # 3km/h
 # =========================
 # 控制参数
 # =========================
-KP_STEER = 0.9
-KD_STEER = 0.15
+KP_STEER = 1.0
+KD_STEER = 0.1
 MAX_STEER = 0.6
 
 KP_SPEED = 0.8
