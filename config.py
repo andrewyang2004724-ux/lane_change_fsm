@@ -11,8 +11,8 @@ SYNC_MODE = True
 FIXED_DELTA_SECONDS = 0.05
 
 MAP_NAME = "Town04"   # 高速环路，适合高速公路换道实验
-# 手动指定自车的出生点索引。
-EGO_SPAWN_POINT_INDEX = 260
+# 手动指定自车的出生点索引。300\
+EGO_SPAWN_POINT_INDEX = 150
 
 # =========================
 # 核心新增：实验场景配置
@@ -21,12 +21,12 @@ EGO_SPAWN_POINT_INDEX = 260
 # "Random" (随机车流，原本模式)
 # "Overtake_Left" (前方慢车，左侧畅通，测试完美超车)
 # "Blocked_Wait" (前方慢车，左侧被平行车辆封堵，测试状态机的等待与择机变道)
-SCENARIO_MODE = "Blocked_Wait"
+SCENARIO_MODE = "Random"
 
 # =========================
 # 录制与视频配置
 # =========================
-RECORD_VIDEO = True                 # 是否开启 MP4 视频录制
+RECORD_VIDEO = False                 # 是否开启 MP4 视频录制
 VIDEO_OUTPUT_DIR = "experiments/videos" # 录制保存目录
 VIDEO_WIDTH = 1280                  # 视频宽度
 VIDEO_HEIGHT = 720                  # 视频高度
@@ -34,10 +34,10 @@ VIDEO_HEIGHT = 720                  # 视频高度
 # =========================
 # 交通流配置
 # =========================
-NUM_TRAFFIC = 45
+NUM_TRAFFIC = 60
 TRAFFIC_MANAGER_PORT = 8000
 TRAFFIC_GLOBAL_DISTANCE = 2.5
-TRAFFIC_SPEED_DIFF_PERCENT = 35.0   # 背景车低于限速的百分比
+TRAFFIC_SPEED_DIFF_PERCENT = 10.0   # 背景车低于限速的百分比
 TRAFFIC_HYBRID_PHYSICS = False
 
 # =========================
