@@ -1,17 +1,12 @@
 {
-  "num_ticks": 4000,
-  "avg_speed_mps": 16.976705431996397,
-  "avg_speed_kmh": 61.11613955518703,
-  "min_curr_front_dist": 12.406208738992014,
-  "collision_count": 0,
-  "lane_invasion_count": 7,
+  "num_ticks": 1366,
+  "avg_speed_mps": 4.439633538047621,
+  "avg_speed_kmh": 15.982680736971437,
+  "min_curr_front_dist": 0.2,
+  "collision_count": 1,
+  "lane_invasion_count": 0,
   "state_distribution": {
-    "FOLLOW_LANE": 3833,
-    "PREPARE_LANE_CHANGE_LEFT": 6,
-    "LANE_CHANGE_LEFT": 127,
-    "OVERTAKE_CRUISE": 1,
-    "PREPARE_RETURN_RIGHT": 2,
-    "LANE_CHANGE_RIGHT": 9,
-    "EMERGENCY_BRAKE": 22
+    "FOLLOW_LANE": 1359,
+    "EMERGENCY_BRAKE": 7
   }
 }

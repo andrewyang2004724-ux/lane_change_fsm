@@ -10,8 +10,18 @@ TIMEOUT = 10.0
 SYNC_MODE = True
 FIXED_DELTA_SECONDS = 0.05
 
-MAP_NAME = "Town04_Opt"   # 高速环路，适合高速公路换道实验
-UNLOAD_MAP_LAYERS = True   # 是否卸载地图图层以提高性能
+MAP_NAME = "Town04"   # 高速环路，适合高速公路换道实验
+# 手动指定自车的出生点索引。
+EGO_SPAWN_POINT_INDEX = 260
+
+# =========================
+# 核心新增：实验场景配置
+# =========================
+# 可选模式: 
+# "Random" (随机车流，原本模式)
+# "Overtake_Left" (前方慢车，左侧畅通，测试完美超车)
+# "Blocked_Wait" (前方慢车，左侧被平行车辆封堵，测试状态机的等待与择机变道)
+SCENARIO_MODE = "Blocked_Wait"
 
 # =========================
 # 录制与视频配置

@@ -2,6 +2,7 @@
 import os
 import time
 import math
+import sys
 import carla
 import queue
 import threading
@@ -11,59 +12,49 @@ import numpy as np
 from config import (
     HOST, PORT, TIMEOUT,
     SYNC_MODE, FIXED_DELTA_SECONDS,
-    MAP_NAME, NUM_TRAFFIC,
+    MAP_NAME, NUM_TRAFFIC, SCENARIO_MODE,
     MAX_TICKS, LOG_CSV, SUMMARY_JSON,
-    UNLOAD_MAP_LAYERS,
     RECORD_VIDEO, VIDEO_OUTPUT_DIR,
     VIDEO_WIDTH, VIDEO_HEIGHT
 )
 
-from scripts.spawn_traffic import spawn_ego, spawn_traffic
+# 【修改导入】：使用全新的场景生成函数
+from scripts.spawn_traffic import spawn_scenario
 from decision.fsm_decider import LaneChangeDecider
 from control.basic_controller import BasicLaneController
 from evaluation.logger import DataLogger
 from evaluation.metrics import summarize_logger, save_summary
 
-# ==========================================
-# 核心修复 1：CARLA 崩溃急救机制
-# 每次启动前强制解除服务器的同步锁定，防止 Timeout
-# ==========================================
-def rescue_carla_server(client):
+def check_connection_and_rescue(client):
+    client.set_timeout(3.0) 
     try:
         world = client.get_world()
         settings = world.get_settings()
         if settings.synchronous_mode:
-            print("Recovering CARLA server from previous crash (disabling sync mode)...")
             settings.synchronous_mode = False
             world.apply_settings(settings)
-    except Exception as e:
-        print("Rescue check passed or no connection.")
+        client.set_timeout(TIMEOUT)
+        return True
+    except RuntimeError:
+        print("❌ 致命错误：无法连接到 CARLA 服务端！")
+        return False
 
 def setup_world(client):
+    """
+    【回退改进】：去除了容易引发崩溃的图层卸载功能，保持最稳定的默认加载。
+    """
     current_map = client.get_world().get_map().name.split("/")[-1]
-    
     if current_map != MAP_NAME:
         print(f"Loading map: {MAP_NAME} ...")
         world = client.load_world(MAP_NAME)
-        time.sleep(2.0) # 给引擎加载物理的时间
+        time.sleep(2.0)
     else:
         world = client.get_world()
-
-    # 卸载冗余图层
-    if MAP_NAME.endswith("_Opt") and UNLOAD_MAP_LAYERS:
-        print("Force unloading map layers...")
-        world.unload_map_layer(carla.MapLayer.All)
-        time.sleep(1.0) # 【核心修复 2】：给虚幻引擎 1 秒钟来清理数以万计的建筑 Mesh，防止死锁
 
     settings = world.get_settings()
     settings.synchronous_mode = SYNC_MODE
     settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
     world.apply_settings(settings)
-    
-    print("Flushing rendering pipeline...")
-    for _ in range(10):
-        world.tick()
-        
     return world
 
 # ==========================================
@@ -158,10 +149,8 @@ def follow_ego_view(world, ego, cache):
 
 def main():
     client = carla.Client(HOST, PORT)
-    client.set_timeout(10.0)
-
-    # 1. 启动前先急救 CARLA 服务器，防止上一次崩溃导致的 timeout
-    rescue_carla_server(client)
+    if not check_connection_and_rescue(client):
+        sys.exit(1)
 
     actor_list = []
     sensor_list = []
@@ -177,7 +166,7 @@ def main():
     if RECORD_VIDEO:
         if not os.path.exists(VIDEO_OUTPUT_DIR):
             os.makedirs(VIDEO_OUTPUT_DIR)
-        rec_name = f"experiment_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        rec_name = f"experiment_{SCENARIO_MODE}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
         rec_path = os.path.join(os.getcwd(), VIDEO_OUTPUT_DIR, rec_name)
         
         fps = int(1.0 / FIXED_DELTA_SECONDS)
@@ -185,30 +174,30 @@ def main():
         video_writer = cv2.VideoWriter(rec_path, fourcc, fps, (VIDEO_WIDTH, VIDEO_HEIGHT))
         image_queue = queue.Queue()
         
-        writer_thread = threading.Thread(target=video_writer_thread, args=(image_queue, video_writer, stop_writer_event))
+        writer_thread = threading.Thread(target=video_writer_thread, args=(image_queue, video_writer, stop_writer_event), daemon=True)
         writer_thread.start()
-        print(f"Video recording initialized in background: {rec_path}")
 
     world = None
 
     try:
-        # 2. 设置世界与地图图层
         world = setup_world(client)
         world_map = world.get_map()
 
-        ego = spawn_ego(world)
+        # ==========================================
+        # 【核心修改】：通过统一接口一键生成指定的实验场景
+        # ==========================================
+        print(f"Spawning Scenario: {SCENARIO_MODE}")
+        ego, traffic_actors, tm = spawn_scenario(world, client)
+        
         actor_list.append(ego)
-
-        traffic_actors, tm = spawn_traffic(world, client, ego, NUM_TRAFFIC)
         actor_list.extend(traffic_actors)
 
-        # 3. 挂载传感器
+        # 挂载传感器
         sensor_list.append(attach_collision_sensor(world, ego, collision_counter))
         sensor_list.append(attach_lane_invasion_sensor(world, ego, invasion_counter))
         if RECORD_VIDEO:
             sensor_list.append(attach_rgb_camera(world, ego, image_queue))
 
-        # 4. 预热，丢弃初始不稳定的帧
         for _ in range(20):
             world.tick()
             follow_ego_view(world, ego, camera_cache)
@@ -219,7 +208,6 @@ def main():
 
         print("Simulation started.")
 
-        # 5. 主循环：专注控制逻辑，绝对不碰视频 IO
         for tick in range(MAX_TICKS):
             world.tick()
 
@@ -241,56 +229,39 @@ def main():
                 print("Collision detected. Stopping simulation early for debugging.")
                 break
 
-        # 6. 数据保存
         logger.save_csv(LOG_CSV)
         summary = summarize_logger(logger, collision_counter["count"], invasion_counter["count"])
         save_summary(summary, SUMMARY_JSON)
         print("Simulation finished.")
 
+    except KeyboardInterrupt:
+        print("\nUser manually interrupted the simulation.")
+
     finally:
         print("Cleaning up resources...")
-        
-        # 1. 优雅退出后台录制线程
         if RECORD_VIDEO:
-            print("Waiting for video writer thread to finish...")
             stop_writer_event.set()
-            if writer_thread is not None:
-                writer_thread.join()
+            if writer_thread is not None and writer_thread.is_alive():
+                writer_thread.join(timeout=2.0)
             if video_writer is not None:
                 video_writer.release()
-            print("Video saved successfully.")
 
-        # ==========================================
-        # 核心修复：防止 CARLA 服务端崩溃闪退
-        # 绝对必须在销毁任何 Actor 之前，先恢复异步模式！
-        # ==========================================
         if world is not None:
             try:
+                client.set_timeout(2.0)
                 settings = world.get_settings()
                 settings.synchronous_mode = False
                 settings.fixed_delta_seconds = None
                 world.apply_settings(settings)
-                # 等待 0.5 秒让引擎彻底切换回异步状态
                 time.sleep(0.5) 
-            except Exception as e:
-                print(f"Warning: Failed to disable sync mode: {e}")
+            except Exception:
+                pass
 
-        # 2. 极其重要：先停止传感器，再销毁
         for s in sensor_list:
-            try:
-                if s.is_alive:
-                    s.stop()
-                    s.destroy()
-            except Exception:
-                pass
+            if s.is_alive: s.destroy()
 
-        # 3. 最后销毁车辆
         for a in actor_list:
-            try:
-                if a.is_alive:
-                    a.destroy()
-            except Exception:
-                pass
+            if a.is_alive: a.destroy()
         
         print("Cleanup complete.")
 
