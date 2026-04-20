@@ -31,15 +31,36 @@ _LAST_SCENE_CACHE = {
 _NEIGHBOR_HOLD_TICKS = 6
 
 def vehicle_info_relative(ego, veh):
+    """
+    【升级版】：在此处计算真实的保险杠到保险杠距离 (Bumper-to-Bumper)
+    彻底解决控制模块因“中心点距离误判”导致的追尾问题。
+    """
     if veh is None:
         return {
             "vehicle": None,
             "dist": 999.0,
             "speed": 999.0,
         }
+        
+    # 1. 获取原始的中心点到中心点纵向投影距离
+    raw_dist = abs(longitudinal_distance(ego, veh))
+    
+    # 2. 扣除两车的前后半长，获取真实物理间距
+    try:
+        # 获取自车和目标车在 CARLA 中的包围盒半长 (extent.x)
+        ego_half_length = ego.bounding_box.extent.x
+        veh_half_length = veh.bounding_box.extent.x
+        
+        # 计算真实距离，并保留 0.2m 作为极限物理引擎防重叠缓冲
+        real_dist = max(0.2, raw_dist - ego_half_length - veh_half_length)
+    except Exception:
+        # 容错处理：如果由于某些原因获取不到 bounding_box，
+        # 假设普通轿车长度(前后半长各约 2.4 米 = 4.8 米总补偿)
+        real_dist = max(0.2, raw_dist - 4.8)
+
     return {
         "vehicle": veh,
-        "dist": abs(longitudinal_distance(ego, veh)),
+        "dist": real_dist,
         "speed": vehicle_speed(veh),
     }
 
@@ -64,10 +85,6 @@ def _lane_gap_ok(curr_wp, candidate, max_gap=2):
     return abs(candidate.lane_id - curr_wp.lane_id) <= max_gap
 
 def _is_reasonable_neighbor(curr_wp, candidate, side="right"):
-    """
-    判断 candidate 是否像 curr_wp 的相邻车道 waypoint。
-    这里只做工程上的稳健过滤，不追求地图语义绝对严格。
-    """
     if curr_wp is None or candidate is None:
         return False
 
@@ -101,22 +118,17 @@ def _advance_wp(wp, step=3.0):
     return wp
 
 def _recover_neighbor_wp(curr_wp, cached_wp, side="right"):
-    """
-    邻道 waypoint 瞬时丢失时，尝试从缓存 waypoint 恢复。
-    """
     if curr_wp is None or cached_wp is None:
         return None
 
     if not _same_section(curr_wp, cached_wp):
         return None
 
-    # 优先向前推进一点，减少使用过旧 waypoint
     candidate = _advance_wp(cached_wp, step=3.0)
 
     if _is_reasonable_neighbor(curr_wp, candidate, side=side):
         return candidate
 
-    # 如果 next 后不合理，退回原 cached_wp 再试一次
     if _is_reasonable_neighbor(curr_wp, cached_wp, side=side):
         return cached_wp
 
@@ -149,9 +161,6 @@ def build_scene(world, world_map, ego):
     left_wp_from_recovery = False
     right_wp_from_recovery = False
 
-    # -----------------------------------------------------
-    # 邻道 waypoint 恢复 + 短时 hold
-    # -----------------------------------------------------
     if ego_wp is not None:
         cached_left = _LAST_SCENE_CACHE["left_wp"]
         cached_right = _LAST_SCENE_CACHE["right_wp"]
@@ -190,9 +199,6 @@ def build_scene(world, world_map, ego):
                     right_wp_from_recovery = True
                 _LAST_SCENE_CACHE["right_hold_ticks"] -= 1
 
-    # -----------------------------------------------------
-    # 当前 / 左 / 右车道车辆
-    # -----------------------------------------------------
     curr_vehicles = _get_lane_vehicles_safe(world, world_map, ego, ego_wp, DETECTION_RADIUS)
     curr_front, curr_rear = _split_front_rear_safe(curr_vehicles)
 
@@ -207,10 +213,6 @@ def build_scene(world, world_map, ego):
     if right_vehicles:
         right_front, right_rear = _split_front_rear_safe(right_vehicles)
 
-    # -----------------------------------------------------
-    # allowed 计算
-    # 注意：allowed 应基于当前 ego 所在车道，而不是恢复出的邻道
-    # -----------------------------------------------------
     left_allowed = lane_change_left_allowed(ego_wp) if ego_wp is not None else False
     right_allowed = lane_change_right_allowed(ego_wp) if ego_wp is not None else False
 
@@ -220,8 +222,6 @@ def build_scene(world, world_map, ego):
         "right_wp": right_wp,
         "left_allowed": left_allowed,
         "right_allowed": right_allowed,
-
-        # 新增：标记邻道 wp 是否来自恢复/hold
         "left_wp_from_recovery": left_wp_from_recovery,
         "right_wp_from_recovery": right_wp_from_recovery,
 
@@ -234,7 +234,6 @@ def build_scene(world, world_map, ego):
         "right_front": vehicle_info_relative(ego, right_front),
         "right_rear": vehicle_info_relative(ego, right_rear),
 
-        # 调试字段
         "debug_scene": {
             "ego_lane_id": getattr(ego_wp, "lane_id", None) if ego_wp is not None else None,
             "ego_road_id": getattr(ego_wp, "road_id", None) if ego_wp is not None else None,
@@ -251,9 +250,6 @@ def build_scene(world, world_map, ego):
         }
     }
 
-    # -----------------------------------------------------
-    # 更新缓存
-    # -----------------------------------------------------
     if ego_wp is not None:
         _LAST_SCENE_CACHE["ego_wp"] = ego_wp
         _LAST_SCENE_CACHE["ego_lane_id"] = getattr(ego_wp, "lane_id", None)

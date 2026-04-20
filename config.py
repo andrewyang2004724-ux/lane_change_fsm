@@ -10,7 +10,16 @@ TIMEOUT = 10.0
 SYNC_MODE = True
 FIXED_DELTA_SECONDS = 0.05
 
-MAP_NAME = "Town06"   # 高速环路，适合高速公路换道实验
+MAP_NAME = "Town04_Opt"   # 高速环路，适合高速公路换道实验
+UNLOAD_MAP_LAYERS = True   # 是否卸载地图图层以提高性能
+
+# =========================
+# 录制与视频配置
+# =========================
+RECORD_VIDEO = True                 # 是否开启 MP4 视频录制
+VIDEO_OUTPUT_DIR = "experiments/videos" # 录制保存目录
+VIDEO_WIDTH = 1280                  # 视频宽度
+VIDEO_HEIGHT = 720                  # 视频高度
 
 # =========================
 # 交通流配置
