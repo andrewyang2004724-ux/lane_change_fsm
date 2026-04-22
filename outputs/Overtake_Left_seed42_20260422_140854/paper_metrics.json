@@ -1,0 +1,23 @@
+{
+  "total_ticks": 2366,
+  "sim_time_s": 118.30000000000001,
+  "avg_speed_mps": 18.959770278368335,
+  "avg_speed_kmh": 68.25517300212601,
+  "min_ttc_s": 1.3573995951396822,
+  "risk_events_ttc_lt_2s": 44,
+  "risk_events_ttc_lt_1p5s": 5,
+  "jerk_p95_mps3": 20.262309301362066,
+  "state_switch_count": 30,
+  "lane_change_enter_count": 4,
+  "state_ratio": {
+    "FOLLOW_LANE": 0.2772612003381234,
+    "PREPARE_RETURN_RIGHT": 0.0016906170752324597,
+    "LANE_CHANGE_RIGHT": 0.021555367709213864,
+    "OVERTAKE_CRUISE": 0.6179205409974641,
+    "EMERGENCY_BRAKE": 0.06635672020287404,
+    "PREPARE_LANE_CHANGE_LEFT": 0.0016906170752324597,
+    "LANE_CHANGE_LEFT": 0.013524936601859678
+  },
+  "collisions": 2,
+  "lane_invasions": 21
+}

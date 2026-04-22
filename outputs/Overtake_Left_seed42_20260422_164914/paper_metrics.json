@@ -1,0 +1,18 @@
+{
+  "total_ticks": 196,
+  "sim_time_s": 9.8,
+  "avg_speed_mps": 15.597957082991227,
+  "avg_speed_kmh": 56.15264549876842,
+  "min_ttc_s": 0.014969532538673997,
+  "risk_events_ttc_lt_2s": 18,
+  "risk_events_ttc_lt_1p5s": 18,
+  "jerk_p95_mps3": 32.18831745916332,
+  "state_switch_count": 1,
+  "lane_change_enter_count": 0,
+  "state_ratio": {
+    "FOLLOW_LANE": 0.9030612244897959,
+    "EMERGENCY_BRAKE": 0.09693877551020408
+  },
+  "collisions": 1,
+  "lane_invasions": 0
+}

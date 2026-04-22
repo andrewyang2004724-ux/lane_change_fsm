@@ -136,29 +136,52 @@ class BasicLaneController:
             return 19.0
         return TARGET_SPEED
 
+    def _get_china_highway_speed_limit(self, lane_id):
+        """
+        [新增] 匹配中国典型四车道高速限速标准 (单位转换至 m/s)
+        CARLA 中右侧行驶时，同向车道 ID 通常为负数（-1为最内侧/最左侧）
+        """
+        abs_lane = abs(lane_id) if lane_id is not None else 2
+        if abs_lane == 1:
+            return 115.0 / 3.6  # 最左侧超车道: ~110-120 km/h
+        elif abs_lane == 2:
+            return 100.0 / 3.6  # 第二车道(快车道): ~90-110 km/h
+        elif abs_lane == 3:
+            return 85.0 / 3.6   # 第三车道(行车道): ~80-100 km/h
+        else:
+            return 70.0 / 3.6   # 最右侧车道(慢车/大客车): ~60-80 km/h
+
     def _longitudinal_control_idm(self, scene, state, yaw_error_abs):
-        """
-        引入 Intelligent Driver Model (IDM) 智能驾驶跟驰模型
-        彻底解决僵硬的起步刹车，实现如同人类驾驶员般平滑丝滑的过渡。
-        """
         current_speed = max(self._speed(), 0.1)
 
-        # 1. 确定期望速度 v0
+        # 1. 动态获取当前/目标车道的专属限速
+        ego_lane_id = scene["ego_wp"].lane_id if scene["ego_wp"] else -2
+        target_lane_id = ego_lane_id
+
+        # 如果处于换道准备或执行中，参考目标车道的限速
+        if self.last_target_lane_change_side == "left" and scene["left_wp"]:
+            target_lane_id = scene["left_wp"].lane_id
+        elif self.last_target_lane_change_side == "right" and scene["right_wp"]:
+            target_lane_id = scene["right_wp"].lane_id
+
+        lane_dynamic_speed = self._get_china_highway_speed_limit(target_lane_id)
+
+        # 2. 确定期望速度 v0
         if state in [FSMState.LANE_CHANGE_LEFT]:
-            v0 = OVERTAKE_SPEED
+            v0 = lane_dynamic_speed + (5.0 / 3.6)  # 超车时允许稍微提速
         elif state in [FSMState.LANE_CHANGE_RIGHT, FSMState.PREPARE_RETURN_RIGHT]:
-            v0 = min(TARGET_SPEED + 1.0, OVERTAKE_SPEED)
+            v0 = lane_dynamic_speed
         elif state == FSMState.EMERGENCY_BRAKE:
             v0 = 0.0
         else:
-            v0 = TARGET_SPEED
+            v0 = lane_dynamic_speed  # 巡航时紧贴本车道限速
+        
         v0 = min(v0, self._curve_speed_limit(yaw_error_abs))
 
-        # 2. 识别关键前车
+        # 3. 识别关键前车 (博弈融合逻辑保持不变)
         s = scene["curr_front"]["dist"]
         v_lead = scene["curr_front"]["speed"]
 
-        # 换道时的前车融合博弈逻辑
         if state in [FSMState.PREPARE_LANE_CHANGE_LEFT, FSMState.LANE_CHANGE_LEFT]:
             left_dist = scene["left_front"]["dist"]
             if left_dist < 999.0:
@@ -171,53 +194,68 @@ class BasicLaneController:
                 s = min(s, right_dist)
                 v_lead = min(v_lead, scene["right_front"]["speed"])
 
-        # 3. IDM 参数定义
-        a_max = 1.5   # 车辆最大舒适加速度 (m/s^2)
-        b = 2.0       # 车辆舒适减速度 (m/s^2)
-        delta = 4.0   # 加速度指数
-        s0 = MIN_GAP  # 停止时的最小安全间距
+        # 4. IDM 参数定义
+        a_max = 3.0   
+        b = 2.0       
+        delta = 4.0   
+        s0 = MIN_GAP  
 
         delta_v = current_speed - v_lead
 
-        # 4. IDM 核心微分计算
+        # 5. IDM 核心微分计算
         if s > 150.0:
-            # 前方畅通无阻，自由巡航
             s_star = 0.0
             term2 = 0.0
         else:
-            # 期望跟车距离计算
             s_star = s0 + current_speed * TIME_HEADWAY + (current_speed * delta_v) / (2.0 * math.sqrt(a_max * b))
-            s_star = max(s_star, s0) # 保底安全距离
+            s_star = max(s_star, s0)
             term2 = (s_star / max(s, 0.1)) ** 2
             
         term1 = (current_speed / max(v0, 0.1)) ** delta
-        
-        # 得到连续平滑的期望加速度
         accel = a_max * (1.0 - term1 - term2)
 
-        # 5. 紧急状况超控
+        # 6. 紧急状况与动力补偿逻辑
         if state == FSMState.EMERGENCY_BRAKE or s < s0 * 0.5:
             throttle_cmd, brake_cmd = 0.0, 0.8
             mode = "emergency_brake"
+            
+        # ==========================================
+        # [关键修复] 必须优先响应 IDM 的刹车需求！安全第一！
+        # 只要算出明显的负加速度，说明前方有车阻挡，无视巡航速度差距直接刹车
+        # ==========================================
+        elif accel < -0.15:
+            throttle_cmd = 0.0
+            brake_cmd = min(MAX_BRAKE, -accel / b)
+            mode = "idm_brake"
+            
         else:
-            # 将加速度映射为油门和刹车踏板指令，设置小死区防抖
-            if accel > 0.15:
-                throttle_cmd = min(MAX_THROTTLE, accel / a_max)
+            # 安全情况下（前方无迫切碰撞风险），如果速度不足，才给油门克服风阻
+            speed_deficit = v0 - current_speed
+            
+            if speed_deficit > 0.5:
+                # 速度明显不足：直接给高油门确保加速
+                throttle_cmd = min(MAX_THROTTLE, 0.4 + speed_deficit * 0.12)
+                brake_cmd = 0.0
+                mode = "speed_deficit_aggressive"
+            elif accel > 0.15:
+                # 加速度充分：按IDM映射并加强
+                throttle_cmd = min(MAX_THROTTLE, (accel / a_max) * 1.5)
                 brake_cmd = 0.0
                 mode = "idm_accel"
-            elif accel < -0.15:
-                throttle_cmd = 0.0
-                brake_cmd = min(MAX_BRAKE, -accel / b)
-                mode = "idm_brake"
             else:
-                throttle_cmd, brake_cmd = 0.0, 0.0
-                mode = "idm_coast"
+                # 巡航或微调维持
+                if speed_deficit > 0.0:
+                    throttle_cmd = 0.20 + speed_deficit * 0.08
+                    brake_cmd = 0.0
+                    mode = "gentle_acceleration"
+                else:
+                    throttle_cmd, brake_cmd = 0.0, 0.0
+                    mode = "idm_coast"
 
         # 踏板平滑滤波模拟人类脚部动作
-        throttle = self._smooth_transition(self.last_throttle, throttle_cmd, rise_rate=0.06, fall_rate=0.15)
+        throttle = self._smooth_transition(self.last_throttle, throttle_cmd, rise_rate=0.12, fall_rate=0.15)
         brake = self._smooth_transition(self.last_brake, brake_cmd, rise_rate=0.15, fall_rate=0.15)
 
-        # 踏板互斥
         if brake > 0.02: throttle = 0.0
         if throttle > 0.02: brake = 0.0
 
@@ -225,7 +263,7 @@ class BasicLaneController:
         self.last_brake = float(max(0.0, min(MAX_BRAKE, brake)))
 
         return self.last_throttle, self.last_brake, {
-            "mode": mode, "idm_accel": accel, "s_star": s_star if s <= 150 else 0.0, "s": s
+            "mode": mode, "idm_accel": accel, "target_v_kmh": v0 * 3.6
         }
 
     def run_step(self, scene, state):

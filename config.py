@@ -12,7 +12,7 @@ FIXED_DELTA_SECONDS = 0.05
 
 MAP_NAME = "Town04"   # 高速环路，适合高速公路换道实验
 # 手动指定自车的出生点索引。300\
-EGO_SPAWN_POINT_INDEX = 150
+EGO_SPAWN_POINT_INDEX = 300
 
 # =========================
 # 核心新增：实验场景配置
@@ -34,7 +34,7 @@ VIDEO_HEIGHT = 720                  # 视频高度
 # =========================
 # 交通流配置
 # =========================
-NUM_TRAFFIC = 60
+NUM_TRAFFIC = 50
 TRAFFIC_MANAGER_PORT = 8000
 TRAFFIC_GLOBAL_DISTANCE = 2.5
 TRAFFIC_SPEED_DIFF_PERCENT = 10.0   # 背景车低于限速的百分比
@@ -72,7 +72,7 @@ KD_STEER = 0.1
 MAX_STEER = 0.6
 
 KP_SPEED = 0.8
-MAX_THROTTLE = 0.65
+MAX_THROTTLE = 1.0      # 提升至1.0，允许充分加速
 MAX_BRAKE = 0.8
 
 # =========================

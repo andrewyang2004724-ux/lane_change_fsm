@@ -1,0 +1,27 @@
+{
+  "timestamp": "20260422_020054",
+  "map": "Town04",
+  "sync_mode": true,
+  "fixed_delta_seconds": 0.05,
+  "max_ticks": 4000,
+  "scenario": "Random",
+  "seed": 42,
+  "num_traffic": 100,
+  "spawn_config": {
+    "scenario_mode": "FREE_FLOW",
+    "seed": 42,
+    "num_traffic_requested": 100,
+    "num_traffic_spawned": 24,
+    "density_factor": 0.3,
+    "slow_lead_enable": false,
+    "left_block_enable": false,
+    "speed_mean_kmh": 102.0,
+    "speed_std_kmh": 8.0,
+    "spawn_gap_min_m": 16.0,
+    "lane_bias": {
+      "ego": 0.45,
+      "left": 0.35,
+      "right": 0.2
+    }
+  }
+}

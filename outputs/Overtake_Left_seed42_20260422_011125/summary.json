@@ -1,0 +1,18 @@
+{
+  "avg_speed_kmh": 35.195609938564665,
+  "avg_speed_mps": 9.776558316267963,
+  "collision_count": 0,
+  "lane_invasion_count": 0,
+  "min_curr_front_dist": 10.573475040902862,
+  "num_ticks": 4000,
+  "state_distribution": {
+    "FOLLOW_LANE": 4000
+  },
+  "ttc_min_s": 5.763339274404096,
+  "risk_events_ttc_lt_2s": 0,
+  "risk_events_ttc_lt_1p5s": 0,
+  "state_switch_count": 0,
+  "scenario": "Overtake_Left",
+  "seed": 42,
+  "num_traffic": 60
+}

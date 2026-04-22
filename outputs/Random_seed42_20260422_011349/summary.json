@@ -1,0 +1,18 @@
+{
+  "avg_speed_kmh": 35.42650177764427,
+  "avg_speed_mps": 9.840694938234519,
+  "collision_count": 0,
+  "lane_invasion_count": 0,
+  "min_curr_front_dist": 10.484298044219472,
+  "num_ticks": 4000,
+  "state_distribution": {
+    "FOLLOW_LANE": 4000
+  },
+  "ttc_min_s": 5.73781053395248,
+  "risk_events_ttc_lt_2s": 0,
+  "risk_events_ttc_lt_1p5s": 0,
+  "state_switch_count": 0,
+  "scenario": "Random",
+  "seed": 42,
+  "num_traffic": 100
+}
